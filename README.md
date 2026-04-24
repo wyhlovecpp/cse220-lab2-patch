@@ -44,58 +44,64 @@ Three API entry points are exposed as C linkage:
 
 2. **`miss_classifier_install(proc_id, addr)`**
    Called at `dcache_fill_line` SUCCESS, right after
-   `dcache_fill_process_cacheline`. This is the ONLY path that inserts a
-   line into `ever_seen` and into the FA shadow at MRU (evicting LRU if
-   over capacity). Gated by `!off_path` and `type != MRT_DPRF` /
-   `MRT_WB` / `MRT_WB_NODIRTY`, so only demand fills move the shadow.
+   `dcache_fill_process_cacheline`. This is the only path that mutates the
+   FA shadow from the miss side (insert-at-MRU, evicting LRU if over
+   capacity). It also defensively `ever_seen.insert`s the line — a no-op in
+   the normal path because `classify_probe` already did so. Gated by
+   `!off_path` and `type != MRT_DPRF` / `MRT_WB` / `MRT_WB_NODIRTY`, so
+   only on-path demand fills move the FA shadow.
 
 3. **`miss_classifier_observe_hit(proc_id, addr)`**
-   Called at each on-path `DCACHE_HIT_ONPATH` site. LRU-promotes the line
-   in the FA shadow so its order tracks the real access stream. Also
-   defensively inserts into `ever_seen` / the shadow if the line isn't
-   there (can only happen during a brief post-warmup transient).
+   Called at each on-path `DCACHE_HIT_ONPATH` site. Promotes the line to
+   MRU in the FA shadow so its LRU order tracks the real access stream.
+   Also defensively inserts into `ever_seen` / the FA shadow if the line
+   isn't there (repair path; a no-op once steady state is reached).
 
 ## Classification logic
 
 On a probe of address `a` (line-aligned using the real dcache's line size):
 
 ```
-seen = a in ever_seen                 # first-touch check
-fa   = a in FA_shadow                 # same-capacity FA shadow probe
-
-if not seen : tag = compulsory        # first time we've ever seen this line
-elif not fa : tag = capacity          # FA of same size would also miss
-else        : tag = conflict          # FA would hit → set-mapping is the culprit
+first_touch = ever_seen.insert(a).second   # record first-touch atomically
+if first_touch : tag = compulsory          # first time this line is demanded
+elif not FA.probe(a) : tag = capacity      # same-sized FA LRU would also miss
+else                 : tag = conflict      # FA would hit → set-mapping artefact
 ```
 
-Neither `ever_seen` nor the FA shadow is touched on the probe path. The FA
-shadow is only mutated by:
-
-* `install(addr)` on a successful real-cache fill (insert-at-MRU),
-* `observe_hit(addr)` on a real-cache hit (promote-to-MRU),
-
-so the FA shadow's LRU order mirrors the access stream the real cache sees.
+`classify_probe` records first-touch into `ever_seen`, which is critical:
+without it, a never-before-installed line that receives N pre-fill demand
+misses (MSHR coalesce, retry, replay) would count as compulsory N times
+instead of once. The FA shadow itself is only mutated by `install` on
+fill-success and by `observe_hit` on real-cache hits, so its LRU order
+mirrors the real access stream.
 
 ## Gating
 
-* `!req->off_path` — off-path fills skipped (no counter, no install).
-* `req->type != MRT_DPRF` — prefetch fills skipped. Prefetchers are also
-  disabled globally in Lab2 via `--pref_framework_on 0`, etc.
+* `!req->off_path` — off-path fills skipped (no install; counter gated
+  separately to `!op->off_path` at the miss / hit sites).
+* `req->type != MRT_DPRF` — hardware-prefetch fills skipped.
+  Prefetchers are disabled globally in Lab2 runs via `--pref_framework_on 0`
+  etc., so MRT_DPRF does not occur in practice.
 * `req->type != MRT_WB && req->type != MRT_WB_NODIRTY` — writebacks skipped.
-* The hit-side `observe_hit` is only called for `!op->off_path` hits.
+* At the 3 miss sites the classifier fires for `DCACHE_MISS_ONPATH` events
+  including `MEM_LD`, `MEM_PF`/`MEM_WH`, and `MEM_ST`. `MEM_PF`
+  (software prefetch) is included because the lab uses memtrace without
+  software-prefetch generation, so this path is inert; the gate mirrors
+  Scarab's own `DCACHE_MISS_ONPATH` counter for the 1:1 partition.
 
 ## Sanity checks
 
-* **4 KiB 64-way is fully associative**: shadow cache matches real cache
-  exactly in that config, so conflict classification must be ~0. Observed
-  mean conflict rate: **0.001** (0.1%) — near-zero residual from initial
-  post-warmup transient.
-* **Per-run partition invariant**: all 161 post-Lab2 `memory.stat.0.csv`
-  files satisfy `compulsory + capacity + conflict == DCACHE_MISS_ONPATH`
-  exactly (verified by a Python spot-check over all files).
-* **Compulsory rate is geometry-independent** (≈0.072 across all 7 configs
-  for the SPEC benchmark suite), as expected — compulsory counts depend on
-  the access stream, not on how the cache is organised.
+* **Partition invariant.** All 161 post-Lab2 `memory.stat.0.csv` files
+  satisfy `DCACHE_MISS_3C_COMPULSORY + CAPACITY + CONFLICT
+  == DCACHE_MISS_ONPATH` to the unit on raw counters
+  (verified: OK=161, BAD=0, worst_diff=0). `summary.csv` is printed with
+  `%.6g`, so aggregated rows there can show ±1..10 rounding out of 10⁶..10⁷
+  — display artefact only.
+* **4 KiB 64-way (fully associative).** Conflict rate ≈ 0.001 across 23
+  workloads, essentially zero as expected for a real-cache FA config.
+* **Compulsory rate.** ≈0.009 across all 7 configs, nearly unchanged
+  (first-touch is a property of the access stream; access counts differ
+  only ~2 % across configs at fixed 20 M-inst ROI).
 
 ## Build
 
