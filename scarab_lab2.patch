@@ -1,0 +1,123 @@
+diff --git a/src/dcache_stage.c b/src/dcache_stage.c
+index b781631..13f5c0d 100644
+--- a/src/dcache_stage.c
++++ b/src/dcache_stage.c
+@@ -56,6 +56,10 @@
+ #include "statistics.h"
+ #include "thread.h"
+ 
++/* CSE220 Lab2: 3C miss classifier (external C++ module). */
++#include "miss_classifier.h"
++#include "memory/mem_req.h"
++
+ /**************************************************************************************/
+ /* Macros */
+ 
+@@ -108,6 +112,12 @@ void init_dcache_stage(uns8 proc_id, const char* name) {
+   init_cache(&dc->dcache, "DCACHE", DCACHE_SIZE, DCACHE_ASSOC, DCACHE_LINE_SIZE, sizeof(Dcache_Data), DCACHE_REPL);
+   reset_dcache_stage();
+ 
++  /* CSE220 Lab2: initialize 3C miss classifier with this dcache's geometry
++   * (number of lines and line size in bytes). */
++  miss_classifier_init((unsigned int)proc_id,
++                       (unsigned int)(DCACHE_SIZE / DCACHE_LINE_SIZE),
++                       (unsigned int)DCACHE_LINE_SIZE);
++
+   dc->ports = (Ports*)malloc(sizeof(Ports) * DCACHE_BANKS);
+   for (uns ii = 0; ii < DCACHE_BANKS; ii++) {
+     char name[MAX_STR_LENGTH + 1];
+@@ -358,6 +368,18 @@ Flag dcache_fill_line(Mem_Req* req) {
+   /* update cacheline fields and wake up dependent ops */
+   dcache_fill_process_cacheline(req, data);
+ 
++  /*
++   * CSE220 Lab2: after a successful demand fill, install the line into the
++   * 3C shadow FA cache so future probes see it.  This is the ONLY place
++   * that mutates ever_seen / FA-LRU from the miss side; classification
++   * itself happens at DCACHE_MISS_ONPATH emission in dcache_cacheline_miss.
++   * Skip prefetch / writeback / off-path fills.
++   */
++  if (!req->off_path && req->type != MRT_DPRF && req->type != MRT_WB &&
++      req->type != MRT_WB_NODIRTY) {
++    miss_classifier_install(req->proc_id, (unsigned long long)req->addr);
++  }
++
+   cycle_count = old_cycle_count;
+   return SUCCESS;
+ }
+@@ -563,6 +585,12 @@ static inline void dcache_cacheline_hit(Op* op, Addr line_addr, Dcache_Data* lin
+   if (!op->off_path) {
+     STAT_EVENT(op->proc_id, DCACHE_HIT);
+     STAT_EVENT(op->proc_id, DCACHE_HIT_ONPATH);
++
++    /* CSE220 Lab2: observe on-path hits so the 3C shadow FA cache sees the
++     * full access stream (otherwise its LRU order diverges from the real
++     * cache and fully-associative runs still show a few "conflict" misses). */
++    miss_classifier_observe_hit(op->proc_id,
++                                (unsigned long long)op->oracle_info.va);
+   } else {
+     STAT_EVENT(op->proc_id, DCACHE_HIT_OFFPATH);
+   }
+@@ -633,6 +661,16 @@ static inline void dcache_cacheline_miss(Op* op, Addr line_addr) {
+         STAT_EVENT(op->proc_id, DCACHE_MISS_LD_ONPATH);
+         op->oracle_info.dcmiss = TRUE;
+         STAT_EVENT(op->proc_id, DCACHE_MISS_LD);
++        /* CSE220 Lab2: probe-classify at the DCACHE_MISS_ONPATH emission
++         * point so 3C counters partition it 1:1.  No shadow-state update
++         * here — install happens in dcache_fill_line SUCCESS. */
++        {
++          int tag = miss_classifier_classify_probe(
++              op->proc_id, (unsigned long long)op->oracle_info.va);
++          if (tag == 0)      STAT_EVENT(op->proc_id, DCACHE_MISS_3C_COMPULSORY);
++          else if (tag == 1) STAT_EVENT(op->proc_id, DCACHE_MISS_3C_CAPACITY);
++          else               STAT_EVENT(op->proc_id, DCACHE_MISS_3C_CONFLICT);
++        }
+       } else {
+         STAT_EVENT(op->proc_id, DCACHE_MISS_OFFPATH);
+         STAT_EVENT(op->proc_id, DCACHE_MISS_LD_OFFPATH);
+@@ -662,6 +700,14 @@ static inline void dcache_cacheline_miss(Op* op, Addr line_addr) {
+         STAT_EVENT(op->proc_id, DCACHE_MISS_LD_ONPATH);
+         op->oracle_info.dcmiss = TRUE;
+         STAT_EVENT(op->proc_id, DCACHE_MISS_LD);
++        /* CSE220 Lab2: probe-classify (MEM_PF / MEM_WH demand miss). */
++        {
++          int tag = miss_classifier_classify_probe(
++              op->proc_id, (unsigned long long)op->oracle_info.va);
++          if (tag == 0)      STAT_EVENT(op->proc_id, DCACHE_MISS_3C_COMPULSORY);
++          else if (tag == 1) STAT_EVENT(op->proc_id, DCACHE_MISS_3C_CAPACITY);
++          else               STAT_EVENT(op->proc_id, DCACHE_MISS_3C_CONFLICT);
++        }
+       } else {
+         STAT_EVENT(op->proc_id, DCACHE_MISS_OFFPATH);
+         STAT_EVENT(op->proc_id, DCACHE_MISS_LD_OFFPATH);
+@@ -693,6 +739,14 @@ static inline void dcache_cacheline_miss(Op* op, Addr line_addr) {
+         STAT_EVENT(op->proc_id, DCACHE_MISS_ST_ONPATH);
+         op->oracle_info.dcmiss = TRUE;
+         STAT_EVENT(op->proc_id, DCACHE_MISS_ST);
++        /* CSE220 Lab2: probe-classify (store-miss). */
++        {
++          int tag = miss_classifier_classify_probe(
++              op->proc_id, (unsigned long long)op->oracle_info.va);
++          if (tag == 0)      STAT_EVENT(op->proc_id, DCACHE_MISS_3C_COMPULSORY);
++          else if (tag == 1) STAT_EVENT(op->proc_id, DCACHE_MISS_3C_CAPACITY);
++          else               STAT_EVENT(op->proc_id, DCACHE_MISS_3C_CONFLICT);
++        }
+       } else {
+         STAT_EVENT(op->proc_id, DCACHE_MISS_OFFPATH);
+         STAT_EVENT(op->proc_id, DCACHE_MISS_ST_OFFPATH);
+diff --git a/src/memory/memory.stat.def b/src/memory/memory.stat.def
+index 82d8462..8f4d4bd 100644
+--- a/src/memory/memory.stat.def
++++ b/src/memory/memory.stat.def
+@@ -226,6 +226,11 @@ DEF_STAT(  DCACHE_MISS_ST_OFFPATH	   , DIST  , NO_RATIO  )
+ 
+ DEF_STAT(  DCACHE_MISS_WAITMEM             , COUNT , NO_RATIO  ) // DCACHE could not insert request into L2
+ 
++// CSE220 Lab2: 3C miss classification for on-path, successfully-inserted demand dcache fills.
++DEF_STAT(  DCACHE_MISS_3C_COMPULSORY       , COUNT , NO_RATIO  )
++DEF_STAT(  DCACHE_MISS_3C_CAPACITY         , COUNT , NO_RATIO  )
++DEF_STAT(  DCACHE_MISS_3C_CONFLICT         , COUNT , NO_RATIO  )
++
+ //Page mode row buffer hit or miss
+ DEF_STAT(  MEM_REQ_ROW_BUFFER_HITS	       , DIST  , NO_RATIO  )
+ DEF_STAT(  MEM_REQ_ROW_BUFFER_MISSES	   , COUNT , NO_RATIO  )  
