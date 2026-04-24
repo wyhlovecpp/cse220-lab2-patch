@@ -10,28 +10,22 @@
  *   - conflict   : seen before AND the FA shadow would hit (i.e. the real
  *                  miss is caused purely by the set-associative mapping).
  *
- * Event model — required to make the 3C counters partition DCACHE_MISS_ONPATH
- * 1:1:
+ * Event model (designed so the 3C counters partition DCACHE_MISS_ONPATH):
  *
- *   - classify_probe() : emit one 3C STAT_EVENT *per* DCACHE_MISS_ONPATH
- *                        event.  This is probe-only: it never mutates the
- *                        shadow state.
+ *   - classify_probe() : called once per DCACHE_MISS_ONPATH event, at the
+ *                        emission site.  Returns the 3C tag and records
+ *                        first-touch in ever_seen (so a line is classified
+ *                        compulsory exactly once — the first time it is
+ *                        ever demanded — even if several pre-fill
+ *                        secondary misses arrive before the fill lands).
+ *                        Does NOT install the line in the FA shadow.
  *   - install()        : called when the real dcache actually installs the
  *                        line (dcache_fill_line's SUCCESS return path).
- *                        Adds the line to ever_seen and installs it in the
- *                        FA shadow (LRU insert, possibly evicting LRU).
- *   - observe_hit()    : called on on-path dcache HITS.  LRU-promotes the
- *                        line in the FA shadow.
- *
- * Rationale: the FA shadow must track "what a same-sized FA cache would hold
- * right now."  A secondary pending miss (a second demand miss to a line
- * whose fill has not yet completed) should classify *identically* to the
- * first pending miss — because the real cache still misses and the FA
- * shadow also still misses.  Only installing on fill-success guarantees
- * that.  Probing without state updates on miss guarantees that multiple
- * pending misses to the same line are counted together with the first
- * miss in the same 3C bucket — so that compulsory + capacity + conflict
- * sum to DCACHE_MISS_ONPATH exactly.
+ *                        Inserts at MRU in the FA shadow, evicting LRU if
+ *                        over capacity.
+ *   - observe_hit()    : called on on-path dcache HITS.  Promotes the line
+ *                        to MRU in the FA shadow so the shadow's LRU order
+ *                        matches the real access stream.
  */
 #ifndef __MISS_CLASSIFIER_H__
 #define __MISS_CLASSIFIER_H__

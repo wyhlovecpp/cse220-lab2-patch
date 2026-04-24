@@ -106,14 +106,16 @@ index b781631..13f5c0d 100644
          STAT_EVENT(op->proc_id, DCACHE_MISS_OFFPATH);
          STAT_EVENT(op->proc_id, DCACHE_MISS_ST_OFFPATH);
 diff --git a/src/memory/memory.stat.def b/src/memory/memory.stat.def
-index 82d8462..8f4d4bd 100644
+index 82d8462..ea35714 100644
 --- a/src/memory/memory.stat.def
 +++ b/src/memory/memory.stat.def
-@@ -226,6 +226,11 @@ DEF_STAT(  DCACHE_MISS_ST_OFFPATH	   , DIST  , NO_RATIO  )
+@@ -226,6 +226,13 @@ DEF_STAT(  DCACHE_MISS_ST_OFFPATH	   , DIST  , NO_RATIO  )
  
  DEF_STAT(  DCACHE_MISS_WAITMEM             , COUNT , NO_RATIO  ) // DCACHE could not insert request into L2
  
-+// CSE220 Lab2: 3C miss classification for on-path, successfully-inserted demand dcache fills.
++// CSE220 Lab2: 3C classification counters for on-path dcache miss events;
++// shadow state is updated on successful on-path demand-line installs and on
++// on-path hits (see miss_classifier.{h,cc}).
 +DEF_STAT(  DCACHE_MISS_3C_COMPULSORY       , COUNT , NO_RATIO  )
 +DEF_STAT(  DCACHE_MISS_3C_CAPACITY         , COUNT , NO_RATIO  )
 +DEF_STAT(  DCACHE_MISS_3C_CONFLICT         , COUNT , NO_RATIO  )

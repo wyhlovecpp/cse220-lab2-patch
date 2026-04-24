@@ -6,16 +6,18 @@
  *   fa        : fully-associative LRU cache (list + hash map, O(1) access)
  *
  * Semantics (Hill & Smith, adapted for the out-of-order/MSHR case):
- *   classify_probe(addr) — decide the 3C tag using current shadow state
- *                          WITHOUT modifying the state.  This lets multiple
- *                          pending misses to the same line count in the
- *                          same bucket, so compulsory+capacity+conflict
- *                          partition DCACHE_MISS_ONPATH 1:1.
- *   install(addr)        — record first-touch (insert into ever_seen) AND
- *                          install the line in the FA shadow at MRU,
- *                          evicting LRU if necessary.  Called once per
- *                          successful real-cache install (dcache_fill_line
- *                          SUCCESS).
+ *   classify_probe(addr) — decide the 3C tag AND record first-touch for
+ *                          this line in ever_seen (so a line is classified
+ *                          compulsory exactly once, even if several
+ *                          pre-fill secondary misses land before the fill
+ *                          completes).  Does NOT install the line in the
+ *                          FA shadow.
+ *   install(addr)        — called when the real dcache installs the line
+ *                          (dcache_fill_line SUCCESS).  Inserts at MRU in
+ *                          the FA shadow, evicting LRU if necessary.
+ *                          Also defensively inserts into ever_seen so the
+ *                          shadow stays consistent if the probe-side was
+ *                          skipped for any reason.
  *   observe_hit(addr)    — LRU-promote the line in the FA shadow.  Called
  *                          on on-path real-cache hits so the shadow LRU
  *                          order tracks the real access stream.
@@ -108,8 +110,16 @@ extern "C" int miss_classifier_classify_probe(unsigned int proc_id,
    * dcache_stage.c's init_dcache_stage() does this. */
   uint64_t line = static_cast<uint64_t>(addr) >> s.line_shift;
 
-  const bool seen = s.ever_seen.count(line) > 0;
-  if (!seen) {
+  /* Mark first-touch immediately at the first miss event for this line.
+   * Without this, multiple pre-fill misses (MSHR-merged secondaries, same
+   * line re-missing before the fill completes) would each be classified
+   * compulsory — which contradicts the Hill & Smith definition, where
+   * compulsory = first reference to a never-before-seen line. The FA
+   * shadow itself is only mutated on fill-success (install) or on
+   * real-cache hits (observe_hit); first-touch bookkeeping is cheaper
+   * to co-locate here with the classification decision. */
+  const bool first_touch = s.ever_seen.insert(line).second;
+  if (first_touch) {
     return 0;  /* compulsory */
   }
   const bool fa_hit = s.fa.probe(line);

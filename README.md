@@ -34,12 +34,13 @@ Three API entry points are exposed as C linkage:
 
 1. **`miss_classifier_classify_probe(proc_id, addr) → tag`**
    Called once per `DCACHE_MISS_ONPATH` event (at each of the three emission
-   sites in `dcache_cacheline_miss`: MEM_LD, MEM_PF/MEM_WH, MEM_ST). This is
-   **probe-only** — it returns a 3C tag using the current shadow state but
-   does NOT mutate it. This is what makes multiple pending misses to the
-   same line (secondary misses behind an outstanding fill) classify into
-   the same bucket as the first miss, so the counters partition
-   `DCACHE_MISS_ONPATH` exactly.
+   sites in `dcache_cacheline_miss`: MEM_LD, MEM_PF/MEM_WH, MEM_ST). Returns
+   a 3C tag and records first-touch in `ever_seen` atomically with the
+   classification. Does **not** install the line in the FA shadow — the
+   shadow install is strictly gated on a successful real-cache fill. This
+   guarantees (i) a line is counted as compulsory exactly once even if
+   several pre-fill secondary misses arrive before the fill completes, and
+   (ii) the 3C counters partition `DCACHE_MISS_ONPATH`.
 
 2. **`miss_classifier_install(proc_id, addr)`**
    Called at `dcache_fill_line` SUCCESS, right after
